@@ -59,6 +59,23 @@ int main(int argc, char **argv) {
     return 0;
 }
 
+/*
+ * Wrapper with error checking for write
+ */
+ssize_t Write(int fd, const void *buf, size_t count) {
+    ssize_t ret;
+    if ((ret = write(fd, buf, count)) == -1) {
+        perror("write");
+        exit(1);
+    }
+    return ret;
+}
+
+void broadcast(char *s){
+    for (struct player *p = playerlist; p; p = p->next) {
+        Write(p->fd, s, sizeof(s));
+    }
+}
 
 void parseargs(int argc, char **argv) {
     int c, status = 0;
