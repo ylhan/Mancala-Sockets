@@ -40,10 +40,11 @@ extern void broadcast(char *s);  /* you need to write this one */
 extern ssize_t Write(int fd, const void *buf, size_t count);
 extern ssize_t Read(int fd, void *buf, size_t count);
 extern struct player *accept_connection();
-// validate_name
+extern int validate_name(const char *name);
 extern int find_network_newline(const char *buf, int n);
 extern int find_newline(const char *buf, int n);
 extern int read_username(struct player *p);
+extern int remove_player(struct player *p);
 // get_board_state
 // broadcast_exclude
 
@@ -93,7 +94,28 @@ int main(int argc, char **argv) {
         for (struct player *p = playerlist; p; p = p->next) {
             // Try to read in username
             if (p->waiting_username == 1) {
+                int ret = read_username(p);
+                if (ret == 0 && p->waiting_username == 0) {
+                    printf("%s has joined the game\n", p->name);
+                } else if (ret == 1) {
+                    char error_msg[] = "Name is already used or it is longer than 78 characters!\r\n";
+                    Write(p->fd, error_msg, sizeof(error_msg));
+                    printf("Invalid name, a player has failed to join the game\n");
+                    close(p->fd);
+                    if (playerlist == p) {
+                        playerlist = p->next;
+                    } else {
+                        int failed = remove_player(p);
+                        if (failed){
+                            printf("Removing player from playerlist failed\n");
+                        }
+                    }
 
+                    if (current_player == p) {
+                        current_player = p->next;
+                    }
+                    free(p);
+                }
             } else if (p->waiting_username == 0) {
                 // Read in
                 // Process if current turn
@@ -166,6 +188,7 @@ struct player *accept_connection() {
     p->inbuf = 0;
     p->room = sizeof(p->name);
     p->after = p->name;
+    p->next = NULL;
     int avg_pebbles = compute_average_pebbles();
     // populate pits
     int i;
@@ -179,24 +202,62 @@ struct player *accept_connection() {
     return p;
 }
 
+int remove_player(struct player *p) {
+    // Remove the player from the middle of the list
+    struct player *prev_p = NULL;
+    for (struct player *x = playerlist; x; x = x->next) {
+        if (x == p) {
+            prev_p->next = x->next;
+            return 0;
+        }
+        prev_p = x;
+    }
+    return 1;
+}
+
 int read_username(struct player *p) {
     int nbytes = Read(p->fd, p->after, p->room);
     if (nbytes <= 0) {
-        close(p->fd);
         return 1;
     }
     // Update inbuf
-    inbuf = inbuf + nbytes;
-    int network_newline = find_network_newline(p->name, inbuf);
-    int newline = find_newline(p->name, inbuf);
+    p->inbuf = p->inbuf + nbytes;
+    int network_newline = find_network_newline(p->name, p->inbuf);
+    int newline = find_newline(p->name, p->inbuf);
     if (network_newline > 0) {
         p->waiting_username = 0;
         (p->name)[network_newline - 2] = '\0';
         (p->name)[network_newline - 1] = '\0';
+        return validate_name(p->name);
     } else if (newline > 0) {
         p->waiting_username = 0;
-        (p->name)[network_newline - 1] = '\0';
+        (p->name)[newline - 1] = '\0';
+        return validate_name(p->name);
+    } else if (p->room == 0) {
+        // The name is too long
+        return 1;
+    } else {
+        p->room = sizeof(p->name) - p->inbuf;
+        p->after = &((p->name)[p->inbuf]);
     }
+    return 0;
+}
+
+/*
+ * Returns 0 if no other player has the given name, else 1 if any other player has the
+ * same name.
+ */
+int validate_name(const char *name) {
+    int count = 0;
+    for (struct player *p = playerlist; p; p = p->next) {
+        if (strcmp(name, p->name) == 0) {
+            count ++;
+            if (count == 2) {
+                return 1;
+            }
+        }
+    }
+    return 0;
 }
 
 /*
