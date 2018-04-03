@@ -18,11 +18,15 @@ int listenfd;
 
 struct player {
     int fd;
-    char name[MAXNAME+1]; 
-    int pits[NPITS+1];  // pits[0..NPITS-1] are the regular pits 
-                        // pits[NPITS] is the end pit
+    char name[MAXNAME + 1];
+    int pits[NPITS + 1]; // pits[0..NPITS-1] are the regular pits
+    // pits[NPITS] is the end pit
     //other stuff undoubtedly needed here
     int waiting_username;
+    // Used for buffered reading of name
+    int inbuf;
+    int room;
+    char *after;
     struct player *next;
 };
 struct player *playerlist = NULL;
@@ -33,9 +37,13 @@ extern void makelistener();
 extern int compute_average_pebbles();
 extern int game_is_over();  /* boolean */
 extern void broadcast(char *s);  /* you need to write this one */
-// accept_connection
+extern ssize_t Write(int fd, const void *buf, size_t count);
+extern ssize_t Read(int fd, void *buf, size_t count);
+extern struct player *accept_connection();
 // validate_name
-// buffered_read
+extern int find_network_newline(const char *buf, int n);
+extern int find_newline(const char *buf, int n);
+extern int read_username(struct player *p);
 // get_board_state
 // broadcast_exclude
 
@@ -59,7 +67,7 @@ int main(int argc, char **argv) {
         // Add in all player fds
         for (struct player *p = playerlist; p; p = p->next) {
             FD_SET(p->fd, &read_fds);
-            if (p->fd > nfds){
+            if (p->fd > nfds) {
                 nfds = p->fd;
             }
         }
@@ -69,11 +77,31 @@ int main(int argc, char **argv) {
             exit(1);
         }
 
-         //  Check if listenfd is ready
+        //  Check if listenfd is ready
         if (FD_ISSET(listenfd, &read_fds)) {
-           // Accept the client
+            // Accept the client
+            struct player *p = accept_connection();
+            if (playerlist == NULL) {
+                playerlist = p;
+                current_player = p;
+            } else {
+                p->next = playerlist;
+                playerlist = p;
+            }
         }
 
+        for (struct player *p = playerlist; p; p = p->next) {
+            // Try to read in username
+            if (p->waiting_username == 1) {
+
+            } else if (p->waiting_username == 0) {
+                // Read in
+                // Process if current turn
+                //
+            } else {
+                printf("SOMETHING WENT WRONG PANIC!\n");
+            }
+        }
     }
 
     broadcast("Game over!\r\n");
@@ -92,6 +120,19 @@ int main(int argc, char **argv) {
 }
 
 /*
+ * Wrapper with error checking for read
+ */
+ssize_t Read(int fd, void *buf, size_t count) {
+    ssize_t ret;
+    if ((ret = read(fd, buf, count)) == -1) {
+        perror("read");
+        exit(1);
+    }
+    return ret;
+}
+
+
+/*
  * Wrapper with error checking for write
  */
 ssize_t Write(int fd, const void *buf, size_t count) {
@@ -103,7 +144,7 @@ ssize_t Write(int fd, const void *buf, size_t count) {
     return ret;
 }
 
-void broadcast(char *s){
+void broadcast(char *s) {
     for (struct player *p = playerlist; p; p = p->next) {
         Write(p->fd, s, sizeof(s));
     }
@@ -111,25 +152,83 @@ void broadcast(char *s){
 
 
 struct player *accept_connection() {
-    int client_fd = accept(fd, NULL, NULL);
+    int client_fd = accept(listenfd, NULL, NULL);
     if (client_fd < 0) {
         perror("server: accept");
-        close(fd);
+        close(listenfd);
         exit(1);
     }
 
     struct player *p = malloc(sizeof(struct player));
     p->fd = client_fd;
-    // Waiting for a username 
+    // Waiting for a username
     p->waiting_username = 1;
+    p->inbuf = 0;
+    p->room = sizeof(p->name);
+    p->after = p->name;
     int avg_pebbles = compute_average_pebbles();
     // populate pits
     int i;
-    for(i = 0; i < (NPITS-1); i++){
+    for (i = 0; i < (NPITS - 1); i++) {
         (p->pits)[i] = avg_pebbles;
     }
     // Last pit is end pit (initialized to zero)
-    (p->pits)[NPITS-1] = 0;
+    (p->pits)[NPITS - 1] = 0;
+    char greeting[] = "Welcome to Mancala. What is your name?\r\n";
+    Write(p->fd, greeting, sizeof(greeting));
+    return p;
+}
+
+int read_username(struct player *p) {
+    int nbytes = Read(p->fd, p->after, p->room);
+    if (nbytes <= 0) {
+        close(p->fd);
+        return 1;
+    }
+    // Update inbuf
+    inbuf = inbuf + nbytes;
+    int network_newline = find_network_newline(p->name, inbuf);
+    int newline = find_newline(p->name, inbuf);
+    if (network_newline > 0) {
+        p->waiting_username = 0;
+        (p->name)[network_newline - 2] = '\0';
+        (p->name)[network_newline - 1] = '\0';
+    } else if (newline > 0) {
+        p->waiting_username = 0;
+        (p->name)[network_newline - 1] = '\0';
+    }
+}
+
+/*
+ * Search the first n characters of buf for a network newline (\r\n).
+ * Return one plus the index of the '\n' of the first network newline,
+ * or -1 if no network newline is found.
+ * Definitely do not use strchr or other string functions to search here. (Why not?)
+ */
+int find_network_newline(const char *buf, int n) {
+    int i;
+    for (i = 1; i < n; i ++) {
+        if (buf[i - 1] == '\r' && buf[i] == '\n') {
+            return i + 1;
+        }
+    }
+    return -1;
+}
+
+/*
+ * Search the first n characters of buf for a newline (\n).
+ * Return one plus the index of the '\n' of the first newline,
+ * or -1 if no newline is found.
+ * Definitely do not use strchr or other string functions to search here. (Why not?)
+ */
+int find_newline(const char *buf, int n) {
+    int i;
+    for (i = 0; i < n; i ++) {
+        if (buf[i] == '\n') {
+            return i + 1;
+        }
+    }
+    return -1;
 }
 
 
@@ -139,7 +238,7 @@ void parseargs(int argc, char **argv) {
     while ((c = getopt(argc, argv, "p:")) != EOF) {
         switch (c) {
         case 'p':
-            port = strtol(optarg, NULL, 0);  
+            port = strtol(optarg, NULL, 0);
             break;
         default:
             status++;
@@ -161,8 +260,8 @@ void makelistener() {
     }
 
     int on = 1;
-    if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, 
-               (const char *) &on, sizeof(on)) == -1) {
+    if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR,
+                   (const char *) &on, sizeof(on)) == -1) {
         perror("setsockopt");
         exit(1);
     }
@@ -185,7 +284,7 @@ void makelistener() {
 
 
 /* call this BEFORE linking the new player in to the list */
-int compute_average_pebbles() { 
+int compute_average_pebbles() {
     struct player *p;
     int i;
 
@@ -208,7 +307,7 @@ int game_is_over() { /* boolean */
     int i;
 
     if (!playerlist) {
-       return 0;  /* we haven't even started yet! */
+        return 0;  /* we haven't even started yet! */
     }
 
     for (struct player *p = playerlist; p; p = p->next) {
