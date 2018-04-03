@@ -22,6 +22,7 @@ struct player {
     int pits[NPITS+1];  // pits[0..NPITS-1] are the regular pits 
                         // pits[NPITS] is the end pit
     //other stuff undoubtedly needed here
+    int waiting_username;
     struct player *next;
 };
 struct player *playerlist = NULL;
@@ -32,6 +33,11 @@ extern void makelistener();
 extern int compute_average_pebbles();
 extern int game_is_over();  /* boolean */
 extern void broadcast(char *s);  /* you need to write this one */
+// accept_connection
+// validate_name
+// buffered_read
+// get_board_state
+// broadcast_exclude
 
 
 int main(int argc, char **argv) {
@@ -40,7 +46,33 @@ int main(int argc, char **argv) {
     parseargs(argc, argv);
     makelistener();
 
+    // Store the highest number file descriptor, currently listenfd
+    int nfds = listenfd;
+    // Store the player whose turn it is
+    struct player *current_player = NULL;
+
     while (!game_is_over()) {
+        fd_set read_fds;
+        FD_ZERO(&read_fds);
+        // Add in listenfd
+        FD_SET(listenfd, &read_fds);
+        // Add in all player fds
+        for (struct player *p = playerlist; p; p = p->next) {
+            FD_SET(p->fd, &read_fds);
+            if (p->fd > nfds){
+                nfds = p->fd;
+            }
+        }
+
+        if (select(nfds + 1, &read_fds, NULL, NULL, NULL) == -1) {
+            perror("select");
+            exit(1);
+        }
+
+         //  Check if listenfd is ready
+        if (FD_ISSET(listenfd, &read_fds)) {
+           // Accept the client
+        }
 
     }
 
@@ -76,6 +108,31 @@ void broadcast(char *s){
         Write(p->fd, s, sizeof(s));
     }
 }
+
+
+struct player *accept_connection() {
+    int client_fd = accept(fd, NULL, NULL);
+    if (client_fd < 0) {
+        perror("server: accept");
+        close(fd);
+        exit(1);
+    }
+
+    struct player *p = malloc(sizeof(struct player));
+    p->fd = client_fd;
+    // Waiting for a username 
+    p->waiting_username = 1;
+    int avg_pebbles = compute_average_pebbles();
+    // populate pits
+    int i;
+    for(i = 0; i < (NPITS-1); i++){
+        (p->pits)[i] = avg_pebbles;
+    }
+    // Last pit is end pit (initialized to zero)
+    (p->pits)[NPITS-1] = 0;
+}
+
+
 
 void parseargs(int argc, char **argv) {
     int c, status = 0;
