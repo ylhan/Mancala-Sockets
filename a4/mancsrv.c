@@ -106,11 +106,11 @@ int main(int argc, char **argv) {
                         broadcast_board(p);
                         if (current_player == NULL) {
                             current_player = p;
-                            printf("It is %s's move.\n", p->name);
-                            snprintf(msg, MAXMESSAGE, "It is %s's move.\r\n", p->name);
-                            broadcast_exclude(msg, p);
+                            printf("It is %s's move.\n", current_player->name);
+                            snprintf(msg, MAXMESSAGE, "It is %s's move.\r\n", current_player->name);
+                            broadcast_exclude(msg, current_player);
                             snprintf(msg, MAXMESSAGE, "Your move?\r\n");
-                            Write(p->fd, msg, strlen(msg));
+                            Write(current_player->fd, msg, strlen(msg));
                         }
                     } else if (ret == 1) {
                         snprintf(msg, MAXMESSAGE, "Invalid name (already used, > 78 characters, or empty)!\r\n");
@@ -126,9 +126,19 @@ int main(int argc, char **argv) {
                         // }
                         free(p);
                         p = prev_p;
-                        if (playerlist == NULL) {
-                            break;
+
+                    } else {
+                        printf("Player disconnected before entering name.\n");
+                        close(p->fd);
+                        int failed = remove_player(p);
+                        if (failed) {
+                            printf("Removing player from player list failed\n");
                         }
+                        // if (current_player == p) {
+                        //     current_player = p->next;
+                        // }
+                        free(p);
+                        p = prev_p;
                     }
                 } else if (p->waiting_username == 0) {
                     if (p == current_player) {
@@ -151,16 +161,20 @@ int main(int argc, char **argv) {
                                         break;
                                     }
                                 }
-                                
+                                printf("It is %s's move.\n", current_player->name);
+                                snprintf(msg, MAXMESSAGE, "It is %s's move.\r\n", current_player->name);
+                                broadcast_exclude(msg, current_player);
+                                snprintf(msg, MAXMESSAGE, "Your move?\r\n");
+                                Write(current_player->fd, msg, strlen(msg));
                             } else if (peb == 1) {
                                 // Out of bounds
                                 printf("%s selected pit %d which is out of bounds\n", p->name, pit);
-                                snprintf(msg, MAXMESSAGE, "%d is out of bounds\r\n", pit);
+                                snprintf(msg, MAXMESSAGE, "%d is out of bounds Select another pit.\r\n", pit);
                                 Write(p->fd, msg, strlen(msg));
                             } else {
                                 // No pebbles in pit
                                 printf("%s selected pit %d which has no pebbles\n", p->name, pit);
-                                snprintf(msg, MAXMESSAGE, "%d has no pebbles\r\n", pit);
+                                snprintf(msg, MAXMESSAGE, "%d has no pebbles. Select another pit.\r\n", pit);
                                 Write(p->fd, msg, strlen(msg));
                             }
                             reset_message_buffer(p);
@@ -176,7 +190,7 @@ int main(int argc, char **argv) {
                             }
                             free(p);
                             p = prev_p;
-                            if (playerlist == NULL) {
+                            if (playerlist == NULL || p == NULL) {
                                 break;
                             }
 
@@ -188,6 +202,11 @@ int main(int argc, char **argv) {
                                     break;
                                 }
                             }
+                            printf("It is %s's move.\n", current_player->name);
+                            snprintf(msg, MAXMESSAGE, "It is %s's move.\r\n", current_player->name);
+                            broadcast_exclude(msg, current_player);
+                            snprintf(msg, MAXMESSAGE, "Your move?\r\n");
+                            Write(current_player->fd, msg, strlen(msg));
                         }
                     } else {
                         // read in their message
@@ -209,9 +228,6 @@ int main(int argc, char **argv) {
                             }
                             free(p);
                             p = prev_p;
-                            if (playerlist == NULL) {
-                                break;
-                            }
                         }
                     }
                 } else {
@@ -219,6 +235,9 @@ int main(int argc, char **argv) {
                 }
             }
             prev_p = p;
+            if (playerlist == NULL || p == NULL) {
+                break;
+            }
         }
     }
 
@@ -377,12 +396,12 @@ void broadcast_board(struct player *p) {
 
 int distribute_pebbles(struct player *p, int pit) {
     int pebbles = (p->pits)[pit];
-    (p->pits)[pit] = 0;
-    if (pebbles < 0 || pebbles >= NPITS) {
+    if (pit < 0 || pit >= NPITS) {
         return 1;
     } else if (pebbles == 0) {
         return 2;
     }
+    (p->pits)[pit] = 0;
     struct player *curr_p = p;
     int start_pit = pit + 1;
     while (pebbles > 0) {
@@ -411,7 +430,7 @@ int distribute_pebbles(struct player *p, int pit) {
 int read_username(struct player *p) {
     int nbytes = Read(p->fd, p->after, p->room);
     if (nbytes <= 0) {
-        return 1;
+        return 2;
     }
     // Update inbuf
     p->inbuf = p->inbuf + nbytes;
