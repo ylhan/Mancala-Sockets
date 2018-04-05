@@ -72,18 +72,24 @@ int main(int argc, char **argv) {
     int nfds = listenfd;
     // Store the player whose turn it is
     struct player *current_player = NULL;
+
+    // Loop until one player has no pebbles in non end pits (the game has ended)
     while (!game_is_over()) {
+        // Create a set of file descriptors
         fd_set read_fds;
         FD_ZERO(&read_fds);
-        // Add in listenfd
+        // Add in listenfd to the set
         FD_SET(listenfd, &read_fds);
-        // Add in all player fds
+        // Add in all player fds to the set
         for (struct player *p = playerlist; p; p = p->next) {
             FD_SET(p->fd, &read_fds);
+            // Get the largest fd (used for select)
             if (p->fd > nfds) {
                 nfds = p->fd;
             }
         }
+
+        // Wait for a file descriptor to unblock
         if (select(nfds + 1, &read_fds, NULL, NULL, NULL) == -1) {
             perror("select");
             exit(1);
@@ -92,6 +98,8 @@ int main(int argc, char **argv) {
         if (FD_ISSET(listenfd, &read_fds)) {
             // Accept the client
             struct player *p = accept_connection();
+            printf("Someone connected.\n");
+            // Add the player to the playerlist
             if (playerlist == NULL) {
                 playerlist = p;
             } else {
@@ -99,18 +107,29 @@ int main(int argc, char **argv) {
                 playerlist = p;
             }
         }
+
+        // Loop through all players to read their messages (if their fd is unblocked) 
+        // and determine the game state and movement of players. This loop contains 
+        // the main game logic of my program.
         struct player *prev_p = NULL;
         for (struct player *p = playerlist; p; p = p->next) {
+            // Check that there is something to read
             if (FD_ISSET(p->fd, &read_fds)) {
-                // Try to read in username
                 if (p->waiting_username == 1) {
+                    // Try to read in username
                     int ret = read_username(p);
                     if (ret == 0 && p->waiting_username == 0) {
+                        // Successfully read in the username
                         reset_message_buffer(p);
+                        // Notify this server and the player of the game state
                         printf("%s has joined the game\n", p->name);
                         snprintf(msg, MAXMESSAGE, "%s has joined the game\r\n", p->name);
                         broadcast_exclude(msg, p);
                         broadcast_board(NULL);
+
+                        // If no current player exists then this player is the
+                        // current player in the game, and broadcast the
+                        // appropriate messages to the player
                         if (current_player == NULL) {
                             current_player = p;
                             printf("It is %s's move.\n", current_player->name);
@@ -120,47 +139,57 @@ int main(int argc, char **argv) {
                             Write(current_player->fd, msg, strlen(msg));
                         }
                     } else if (ret == 1) {
+                        // Read call succeeded but the player entered an invalid name.
+                        // Inform the player that their name is invalid and remove
+                        // them from the game
                         snprintf(msg, MAXMESSAGE, "Invalid name (already used, > 78 characters, or empty)!\r\n");
                         Write(p->fd, msg, strlen(msg));
                         printf("Invalid name, a player has failed to join the game\n");
+                        // Close the player's fd and then remove them from the playerlist
+                        // followed by freeing their struct
                         close(p->fd);
                         int failed = remove_player(p);
                         if (failed) {
                             printf("Removing player from player list failed\n");
                         }
-                        // if (current_player == p) {
-                        //     current_player = p->next;
-                        // }
                         free(p);
                         p = prev_p;
 
                     } else {
+                        // Read call failed because the player connected.
+                        // The player will be removed and appropriate messages
+                        // outputed to the server log
                         printf("Player disconnected before entering name.\n");
                         close(p->fd);
                         int failed = remove_player(p);
                         if (failed) {
                             printf("Removing player from player list failed\n");
                         }
-                        // if (current_player == p) {
-                        //     current_player = p->next;
-                        // }
                         free(p);
                         p = prev_p;
                     }
                 } else if (p->waiting_username == 0) {
+                    // If the player has a username (i.e. the player is in game)
                     if (p == current_player) {
+                        // If it is the current player attempt to read in their
+                        // move
                         int ret = buffered_read(p);
                         if (ret == 0) {
+                            // Successfully read in their move
                             reset_message_buffer(p);
-                            // try to parse number
+                            // Try to parse number
                             int pit = strtol(p->msg, NULL, 10);
                             int peb = distribute_pebbles(p, pit);
                             if (peb == 0) {
+                                // The player entered a valid pit so we broadcast and
+                                // process their move
                                 printf("%s selected pit %d\n", p->name, pit);
                                 snprintf(msg, MAXMESSAGE, "%s selected pit %d\r\n", p->name, pit);
                                 broadcast(msg);
                                 broadcast_board(NULL);
 
+                                // Advanced the turn to the next player (if possible)
+                                // and broadcast this to other players
                                 current_player = find_next_player(current_player);
                                 if (current_player != NULL) {
                                     printf("It is %s's move.\n", current_player->name);
@@ -170,34 +199,47 @@ int main(int argc, char **argv) {
                                     Write(current_player->fd, msg, strlen(msg));
                                 }
                             } else if (peb == 1) {
-                                // Out of bounds
+                                // The pit that the player entered is out of bounds meaning that it's
+                                // less than 0 or greater than or equal to NPITS. Inform the player
+                                // of this mistake.
                                 printf("%s selected pit %d which is out of bounds\n", p->name, pit);
                                 snprintf(msg, MAXMESSAGE, "%d is out of bounds Select another pit.\r\n", pit);
                                 Write(p->fd, msg, strlen(msg));
                             } else {
-                                // No pebbles in pit
+                                // No pebbles in pit that the player selected, and informs the player of this.
                                 printf("%s selected pit %d which has no pebbles\n", p->name, pit);
                                 snprintf(msg, MAXMESSAGE, "%d has no pebbles. Select another pit.\r\n", pit);
                                 Write(p->fd, msg, strlen(msg));
                             }
                             reset_message_buffer(p);
                         } else if (ret == 1) {
-                            // user disconnected
+                            // Read call failed due to user disconnecting
+                            // Close the player's fd and then broadcast their disconnection
+                            // to the other players
                             close(p->fd);
                             printf("%s has disconnected\n", p->name);
                             snprintf(msg, MAXMESSAGE, "%s has disconnected\r\n", p->name);
                             broadcast_exclude(msg, p);
+
+                            // Try to find the next player to advance the turn if possible
                             current_player = find_next_player(current_player);
                             if (current_player == p) {
                                 current_player = NULL;
                             }
+
+                            // Remove the player and free the memory they use
                             int failed = remove_player(p);
                             if (failed) {
                                 printf("Removing player from player list failed\n");
                             }
                             free(p);
+
+                            // Check if the next player has been found and reset
+                            // the player pointer to the previous player, since the 
+                            // current player has been removed.
                             p = prev_p;
                             if (current_player != NULL) {
+                                // Broadcast that it's the next player's turn.
                                 printf("It is %s's move.\n", current_player->name);
                                 snprintf(msg, MAXMESSAGE, "It is %s's move.\r\n", current_player->name);
                                 broadcast_exclude(msg, current_player);
@@ -206,18 +248,22 @@ int main(int argc, char **argv) {
                             }
                         }
                     } else {
-                        // read in their message
+                        // It is not the current player's turn but we read in their message anyways
                         char temp[MAXMESSAGE];
                         int ret = Read(p->fd, temp, MAXMESSAGE);
                         if (ret > 0) {
+                            // The user typed a message while it was not there turn, so inform them of this.
                             printf("%s sent a message while it was not their turn\n", p->name);
                             snprintf(msg, MAXMESSAGE, "It is not your move\r\n");
                             Write(p->fd, msg, strlen(msg));
                         } else {
-                            // user disconnected
+                            // User disconnected so remove them from the game
+                            // close their fd and free the memory they used.
                             close(p->fd);
                             printf("%s has disconnected\n", p->name);
                             snprintf(msg, MAXMESSAGE, "%s has disconnected\r\n", p->name);
+                            // Broadcast a message informing the other players that this player
+                            // has left the game
                             broadcast_exclude(msg, p);
                             int failed = remove_player(p);
                             if (failed) {
@@ -228,9 +274,14 @@ int main(int argc, char **argv) {
                         }
                     }
                 } else {
-                    printf("SOMETHING WENT WRONG PANIC!\n"); // Hopefully this never happens
+                    // Just in case something goes wrong (I have never seen
+                    // this message actually outputted)
+                    printf("SOMETHING WENT WRONG PANIC!\n"); 
                 }
             }
+            // Make sure that p is valid and not null. This is necessary when
+            // a player is removed in the middle of this loop so the player
+            // pointer must be reset to the previous player.
             prev_p = p;
             if (playerlist == NULL || p == NULL) {
                 break;
@@ -445,6 +496,7 @@ int buffered_read(struct player *p) {
  * board state of the given player.
  */
 void get_player_board(struct player *p, char *s) {
+    printf("%s:  [0]%d [1]%d [2]%d [3]%d [4]%d [5]%d  [end pit]%d\n", p->name, (p->pits)[0], (p->pits)[1], (p->pits)[2], (p->pits)[3], (p->pits)[4], (p->pits)[5], (p->pits)[6]);
     snprintf(s, MAXMESSAGE, "%s:  [0]%d [1]%d [2]%d [3]%d [4]%d [5]%d  [end pit]%d\r\n", p->name, (p->pits)[0], (p->pits)[1], (p->pits)[2], (p->pits)[3], (p->pits)[4], (p->pits)[5], (p->pits)[6]);
 }
 
