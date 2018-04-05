@@ -110,7 +110,7 @@ int main(int argc, char **argv) {
                         printf("%s has joined the game\n", p->name);
                         snprintf(msg, MAXMESSAGE, "%s has joined the game\r\n", p->name);
                         broadcast_exclude(msg, p);
-                        broadcast_board(p);
+                        broadcast_board(NULL);
                         if (current_player == NULL) {
                             current_player = p;
                             printf("It is %s's move.\n", current_player->name);
