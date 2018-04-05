@@ -155,16 +155,16 @@ int main(int argc, char **argv) {
                             } else if (peb == 1) {
                                 // Out of bounds
                                 printf("%s selected pit %d which is out of bounds\n", p->name, pit);
-                                snprintf(msg, MAXMESSAGE, "%s selected pit %d which is out of bounds\r\n", p->name, pit);
+                                snprintf(msg, MAXMESSAGE, "%d is out of bounds\r\n", pit);
                                 Write(p->fd, msg, strlen(msg));
                             } else {
                                 // No pebbles in pit
                                 printf("%s selected pit %d which has no pebbles\n", p->name, pit);
-                                snprintf(msg, MAXMESSAGE, "%s selected pit %d which has no pebbles\r\n", p->name, pit);
+                                snprintf(msg, MAXMESSAGE, "%d has no pebbles\r\n", pit);
                                 Write(p->fd, msg, strlen(msg));
                             }
                             reset_message_buffer(p);
-                        } else if (ret = 1) {
+                        } else if (ret == 1) {
                             // user disconnected
                             close(p->fd);
                             printf("%s has disconnected\n", p->name);
