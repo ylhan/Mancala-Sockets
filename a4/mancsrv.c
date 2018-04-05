@@ -498,12 +498,16 @@ int distribute_pebbles(struct player *p, int pit) {
             if (pebbles > 0) {
                 (curr_p->pits)[i] += 1;
                 pebbles -= 1;
+            } else {
+                return 0;
             }
         }
 
         // Reset to the first player if we reach the end of the list
         if (curr_p->next == NULL) {
             curr_p = playerlist;
+        } else {
+            curr_p = curr_p->next;
         }
         // Find the next player ingame
         for (struct player *x = curr_p; x; x = x->next) {
