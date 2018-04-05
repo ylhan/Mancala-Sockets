@@ -21,15 +21,21 @@ struct player {
     char name[MAXNAME + 1];
     int pits[NPITS + 1]; // pits[0..NPITS-1] are the regular pits
     // pits[NPITS] is the end pit
-    //other stuff undoubtedly needed here
+    struct player *next;
+
+    // 1 if the user does not have a name yet and 0 if they do
     int waiting_username;
-    // Field for reading in message
+
+    // Used to store the message the player sends to the server
     char msg[MAXMESSAGE];
-    // Used for buffered reading
+
+    /* The following variables are used to store how many characters have
+     * been read into msg. This is necessary incase the server doesn't
+     * receive a full message that is terminated by \r\n or \n
+     */
     int inbuf;
     int room;
     char *after;
-    struct player *next;
 };
 struct player *playerlist = NULL;
 
@@ -53,6 +59,7 @@ extern void get_player_board(struct player *p, char *s);
 extern void broadcast_board(struct player *p);
 extern void broadcast_exclude(char *s, struct player *p);  /* you need to write this one */
 extern int distribute_pebbles(struct player *p, int pit);
+extern struct player *find_next_player(struct player *current_player);
 
 
 int main(int argc, char **argv) {
@@ -154,18 +161,14 @@ int main(int argc, char **argv) {
                                 broadcast(msg);
                                 broadcast_board(NULL);
 
-                                // Find next current player
-                                for (struct player *x = p->next; x; x = x->next) {
-                                    if (x->waiting_username == 0) {
-                                        current_player = x;
-                                        break;
-                                    }
+                                current_player = find_next_player(current_player);
+                                if (current_player != NULL) {
+                                    printf("It is %s's move.\n", current_player->name);
+                                    snprintf(msg, MAXMESSAGE, "It is %s's move.\r\n", current_player->name);
+                                    broadcast_exclude(msg, current_player);
+                                    snprintf(msg, MAXMESSAGE, "Your move?\r\n");
+                                    Write(current_player->fd, msg, strlen(msg));
                                 }
-                                printf("It is %s's move.\n", current_player->name);
-                                snprintf(msg, MAXMESSAGE, "It is %s's move.\r\n", current_player->name);
-                                broadcast_exclude(msg, current_player);
-                                snprintf(msg, MAXMESSAGE, "Your move?\r\n");
-                                Write(current_player->fd, msg, strlen(msg));
                             } else if (peb == 1) {
                                 // Out of bounds
                                 printf("%s selected pit %d which is out of bounds\n", p->name, pit);
@@ -184,29 +187,23 @@ int main(int argc, char **argv) {
                             printf("%s has disconnected\n", p->name);
                             snprintf(msg, MAXMESSAGE, "%s has disconnected\r\n", p->name);
                             broadcast_exclude(msg, p);
+                            current_player = find_next_player(current_player);
+                            if (current_player == p) {
+                                current_player = NULL;
+                            }
                             int failed = remove_player(p);
                             if (failed) {
                                 printf("Removing player from player list failed\n");
                             }
                             free(p);
                             p = prev_p;
-                            if (playerlist == NULL || p == NULL) {
-                                break;
+                            if (current_player != NULL) {
+                                printf("It is %s's move.\n", current_player->name);
+                                snprintf(msg, MAXMESSAGE, "It is %s's move.\r\n", current_player->name);
+                                broadcast_exclude(msg, current_player);
+                                snprintf(msg, MAXMESSAGE, "Your move?\r\n");
+                                Write(current_player->fd, msg, strlen(msg));
                             }
-
-                            // Find next current player
-                            current_player = NULL;
-                            for (struct player *x = p->next; x; x = x->next) {
-                                if (x->waiting_username == 0) {
-                                    current_player = x;
-                                    break;
-                                }
-                            }
-                            printf("It is %s's move.\n", current_player->name);
-                            snprintf(msg, MAXMESSAGE, "It is %s's move.\r\n", current_player->name);
-                            broadcast_exclude(msg, current_player);
-                            snprintf(msg, MAXMESSAGE, "Your move?\r\n");
-                            Write(current_player->fd, msg, strlen(msg));
                         }
                     } else {
                         // read in their message
@@ -241,6 +238,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    // Game is over so broadcast the number of points each player had
     broadcast("Game over!\r\n");
     printf("Game over!\n");
     for (struct player *p = playerlist; p; p = p->next) {
@@ -281,12 +279,22 @@ ssize_t Write(int fd, const void *buf, size_t count) {
     return ret;
 }
 
+/*
+ * Broadcasts the given string to all players in the game (all players that
+ * have a name)
+ */
 void broadcast(char *s) {
     for (struct player *p = playerlist; p; p = p->next) {
-        Write(p->fd, s, strlen(s));
+        if (p->waiting_username == 0) {
+            Write(p->fd, s, strlen(s));
+        }
     }
 }
 
+/*
+ * Broadcasts the given string to all players in the game (all players that
+ * have a name) except the given player x
+ */
 void broadcast_exclude(char *s, struct player *x) {
     for (struct player *p = playerlist; p; p = p->next) {
         if (p != x && p->waiting_username == 0) {
@@ -295,14 +303,21 @@ void broadcast_exclude(char *s, struct player *x) {
     }
 }
 
-
+/*
+ * Used to reset the player's message buffer variables that  keep track of
+ * the status of the message a player is trying to send
+ */
 void reset_message_buffer(struct player *p) {
     p->inbuf = 0;
     p->room = sizeof(p->msg);
     p->after = p->msg;
 }
 
+/*
+ * Accepts a connection from the listenfd
+ */
 struct player *accept_connection() {
+    // Tries to accept a connection
     int client_fd = accept(listenfd, NULL, NULL);
     if (client_fd < 0) {
         perror("server: accept");
@@ -310,37 +325,71 @@ struct player *accept_connection() {
         exit(1);
     }
 
+    // Creates a player for this connection
     struct player *p = malloc(sizeof(struct player));
+    // Initializes player internal variables
     p->fd = client_fd;
-    // Waiting for a username
-    p->waiting_username = 1;
     p->inbuf = 0;
     p->room = sizeof(p->name);
     p->after = p->name;
     p->next = NULL;
+    // Waiting for a username
+    p->waiting_username = 1;
+
+    // Computes the average pebbles for the new player
     int avg_pebbles = compute_average_pebbles();
-    // populate pits
+    // Populates the new player's pits
     int i;
     for (i = 0; i < (NPITS); i++) {
         (p->pits)[i] = avg_pebbles;
     }
     // Last pit is end pit (initialized to zero)
     (p->pits)[NPITS] = 0;
+    // Sends the new player a greeting asking them for their name
     char greeting[] = "Welcome to Mancala. What is your name?\r\n";
-    Write(p->fd, greeting, sizeof(greeting));
+    Write(p->fd, greeting, strlen(greeting));
     return p;
 }
 
+/*
+ * This function will find the next player in the game after the current player
+ * if no such player exists or no other player is in game (has a name) then
+ * NULL is returned.
+ */
+struct player *find_next_player(struct player *current_player) {
+    struct player *next_player = current_player->next;
+    // Make sure we do not loop forever since the playerlist is circular
+    int loops = 0;
+    // Loop through the playerlist and try to find the next player ingame
+    while (loops < 2) {
+        if (next_player != NULL && next_player->waiting_username == 0) {
+            return next_player;
+        } else if (next_player == NULL) {
+            next_player = playerlist;
+        } else {
+            next_player = next_player->next;
+        }
+        loops += 1;
+    }
+    return NULL;
+}
+
+/*
+ * Removes the given player from the playerlist. Returns 0 upon success and
+ * 1 if failure.
+ */
 int remove_player(struct player *p) {
+    // If the player is first just set playerlist to the next player
     if (playerlist == p) {
         playerlist = p->next;
         return 0;
     }
 
-    // Remove the player from the middle of the list
+    // Player isn't first so remove the player from the middle of the list
     struct player *prev_p = NULL;
     for (struct player *x = playerlist; x; x = x->next) {
         if (x == p) {
+            // Make sure the links in the playerlist aren't broken
             prev_p->next = x->next;
             return 0;
         }
@@ -349,62 +398,101 @@ int remove_player(struct player *p) {
     return 1;
 }
 
+/*
+ * This function reads in a message for the given player. This function
+ * will set internal variables in player incase the message isn't complete.
+ * Returns 1 if read failed, 2 if message is incomplete, and 0 upon
+ * successful read.
+ */
 int buffered_read(struct player *p) {
+    // Try to read into player
     int nbytes = Read(p->fd, p->after, p->room);
+    // Read failed or socket closed
     if (nbytes <= 0) {
         return 1;
     }
+
     // Update inbuf
     p->inbuf = p->inbuf + nbytes;
+
+    // Find \r\n or \n to determine if the read call is complete
     int network_newline = find_network_newline(p->msg, p->inbuf);
     int newline = find_newline(p->msg, p->inbuf);
+
     if (network_newline > 0) {
+        // Remove the network newline from the message
         (p->msg)[network_newline - 2] = '\0';
         (p->msg)[network_newline - 1] = '\0';
         return 0;
     } else if (newline > 0) {
+        // Remove the newline from the message
         (p->msg)[newline - 1] = '\0';
         return 0;
     } else if (p->room == 0) {
-        // The name is too long
+        // The message is too long
         return 1;
     } else {
+        // Update the player's internal buffer variables incase read is
+        // incomplete
         p->room = sizeof(p->msg) - p->inbuf;
         p->after = &((p->msg)[p->inbuf]);
     }
     return 2;
 }
 
+/*
+ * Populates the given string variable with the string representation of the
+ * board state of the given player.
+ */
 void get_player_board(struct player *p, char *s) {
     snprintf(s, MAXMESSAGE, "%s:  [0]%d [1]%d [2]%d [3]%d [4]%d [5]%d  [end pit]%d\r\n", p->name, (p->pits)[0], (p->pits)[1], (p->pits)[2], (p->pits)[3], (p->pits)[4], (p->pits)[5], (p->pits)[6]);
 }
 
-// If p null then broadcast to everyone
+/*
+ * Broadcasts the board to 1 player, or if no player is given (NULL) then
+ * broadcast the board to everyone in the game (excluding those without names)
+ */
 void broadcast_board(struct player *p) {
     for (struct player *x = playerlist; x; x = x->next) {
         if (x->waiting_username == 0) {
             char msg[MAXMESSAGE];
+            // Get the string representation of the player's board
             get_player_board(x, msg);
             if (p != NULL) {
+                // Send to the given player
                 Write(p->fd, msg, strlen(msg));
             } else {
+                // No given player so send to everyone
                 broadcast(msg);
             }
         }
     }
 }
 
+/*
+ * Given a pit and a player this function will distribute the pebbles in
+ * the given pit to the subsequent pits until they run out. Returns 1 if
+ * pit is out of bounds or the end pit, 2 if no pebbles are in the given pit,
+ * and 0 upon successful distribution of pebbles.
+ */
 int distribute_pebbles(struct player *p, int pit) {
-    int pebbles = (p->pits)[pit];
+    // Make sure the pit is within bounds
     if (pit < 0 || pit >= NPITS) {
         return 1;
-    } else if (pebbles == 0) {
+    }
+    int pebbles = (p->pits)[pit];
+    // Make sure pit isn't empty
+    if (pebbles == 0) {
         return 2;
     }
+
+    // Take the pebbles and distribute them to the subsequent pits
     (p->pits)[pit] = 0;
     struct player *curr_p = p;
     int start_pit = pit + 1;
+    // Distribute until we have none left
     while (pebbles > 0) {
+        // Distribute the pebbles for this player
         int i;
         for (i = start_pit; i < NPITS + 1; i ++) {
             if (pebbles > 0) {
@@ -413,9 +501,11 @@ int distribute_pebbles(struct player *p, int pit) {
             }
         }
 
+        // Reset to the first player if we reach the end of the list
         if (curr_p->next == NULL) {
             curr_p = playerlist;
         }
+        // Find the next player ingame
         for (struct player *x = curr_p; x; x = x->next) {
             if (x->waiting_username == 0) {
                 curr_p = x;
@@ -427,28 +517,44 @@ int distribute_pebbles(struct player *p, int pit) {
     return 0;
 }
 
+/*
+ * Buffered read call to read in the player's name. Returns 2 if read failed,
+ * 1 if there is another issue with the name (empty string, same name, too
+ * long), and 0 if read call is incomplete OR successful. A successful read
+ * of the username is determined by setting wait_username in the given player
+ * to 0.
+ */
 int read_username(struct player *p) {
+    // Try to read in the player's username
     int nbytes = Read(p->fd, p->after, p->room);
+    // Read failed
     if (nbytes <= 0) {
         return 2;
     }
     // Update inbuf
     p->inbuf = p->inbuf + nbytes;
+    // Try to find \r\n or \n
     int network_newline = find_network_newline(p->name, p->inbuf);
     int newline = find_newline(p->name, p->inbuf);
     if (network_newline > 0) {
+        // Reading of the username was successful
         p->waiting_username = 0;
+        // Remove the network newline from the message
         (p->name)[network_newline - 2] = '\0';
         (p->name)[network_newline - 1] = '\0';
         return validate_name(p->name);
     } else if (newline > 0) {
+        // Reading of the username was successful
         p->waiting_username = 0;
+        // Remove the newline from the message
         (p->name)[newline - 1] = '\0';
         return validate_name(p->name);
     } else if (p->room == 0) {
         // The name is too long
         return 1;
     } else {
+        // Update the player's internal buffer variables because read was
+        // incomplete.
         p->room = sizeof(p->name) - p->inbuf;
         p->after = &((p->name)[p->inbuf]);
     }
@@ -456,13 +562,15 @@ int read_username(struct player *p) {
 }
 
 /*
- * Returns 0 if no other player has the given name, else 1 if any other player has the
- * same name.
+ * Returns 0 if no other player has the given name, and 1 if any other player
+ * has the same name or name is empty string.
  */
 int validate_name(const char *name) {
+    // Check for empty string
     if (strcmp(name, "") == 0) {
         return 1;
     }
+    // Make sure no other player has the same name
     int count = 0;
     for (struct player *p = playerlist; p; p = p->next) {
         if (strcmp(name, p->name) == 0) {
